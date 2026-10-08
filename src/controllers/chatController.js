@@ -180,6 +180,75 @@ const fetchMessages = async (req, res) => {
   }
 }
 
+const fetchMessagesPage = async (req, res) => {
+  try {
+    /*
+    #swagger.summary = 'Load one bounded page of chat messages'
+    #swagger.description = 'Seeks to before without returning messages, then returns at most pageSize messages per request'
+    #swagger.requestBody = {
+      required: true,
+      schema: {
+        type: 'object',
+        required: ['chatId'],
+        properties: {
+          chatId: { type: 'string', example: '6281288888888@c.us' },
+          lowerTimestamp: { type: 'integer', default: 0, example: 1700000000 },
+          upperTimestamp: { type: 'integer', example: 1800000000 },
+          before: {
+            type: 'object',
+            nullable: true,
+            properties: {
+              timestamp: { type: 'integer', example: 1750000000 },
+              messageId: { type: 'string', example: 'ABC123' }
+            }
+          },
+          pageSize: { type: 'integer', minimum: 1, maximum: 500, default: 200 }
+        }
+      }
+    }
+    */
+    const {
+      chatId,
+      lowerTimestamp: requestedLowerTimestamp,
+      upperTimestamp: requestedUpperTimestamp,
+      before = null,
+      pageSize = 200
+    } = req.body || {}
+    const lowerTimestamp = requestedLowerTimestamp ?? 0
+    const upperTimestamp = requestedUpperTimestamp ?? Number.MAX_SAFE_INTEGER
+    if (
+      typeof chatId !== 'string' || !chatId ||
+      !Number.isFinite(lowerTimestamp) ||
+      !Number.isFinite(upperTimestamp) ||
+      lowerTimestamp > upperTimestamp ||
+      !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 500 ||
+      (before !== null && (
+        !Number.isFinite(before.timestamp) ||
+        typeof before.messageId !== 'string' || !before.messageId
+      ))
+    ) {
+      sendErrorResponse(res, 422, 'Invalid bounded message page request')
+      return
+    }
+
+    const client = sessions.get(req.params.sessionId)
+    const chat = await client.getChatById(chatId)
+    if (!chat) {
+      sendErrorResponse(res, 404, 'Chat not Found')
+      return
+    }
+    const page = await chat.fetchMessagesPage({
+      lowerTimestamp,
+      upperTimestamp,
+      before,
+      pageSize
+    })
+    res.json({ success: true, ...page })
+  } catch (error) {
+    sendErrorResponse(res, 500, error.message)
+  }
+}
+
 /**
  * Gets the contact for a chat
  * @async
@@ -514,6 +583,7 @@ module.exports = {
   clearState,
   deleteChat,
   fetchMessages,
+  fetchMessagesPage,
   getContact,
   sendStateRecording,
   sendStateTyping,

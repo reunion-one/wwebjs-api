@@ -2228,8 +2228,47 @@ const runMethod = async (req, res) => {
   }
 }
 
+const getHistorySyncState = async (req, res) => {
+  /*
+    #swagger.summary = 'Read current WhatsApp history synchronization readiness'
+  */
+  try {
+    const client = sessions.get(req.params.sessionId)
+    if (!client || !client.pupPage) {
+      return res.json({
+        success: true,
+        state: {
+          ready: false,
+          hasSynced: false,
+          connectionState: null,
+          isOfflineDeliveryEnd: false,
+          isResumeComplete: false,
+        },
+      })
+    }
+    const state = await client.pupPage.evaluate(() => {
+      const Socket = window.require('WAWebSocketModel').Socket
+      const BackendEventBus = window.require('WAWebBackendEventBus').BackendEventBus
+      const OfflineMessageHandler = window.require('WAWebOfflineHandler').OfflineMessageHandler
+      return {
+        ready: Socket.hasSynced === true && Socket.state === 'CONNECTED' && typeof window.WWebJS !== 'undefined',
+        hasSynced: Socket.hasSynced === true,
+        connectionState: Socket.state ?? null,
+        isOfflineDeliveryEnd: BackendEventBus.isOfflineDeliveryEnd === true,
+        isResumeComplete: OfflineMessageHandler.isResumeComplete() === true,
+        hasMessagesToDownload: OfflineMessageHandler.getHasMessagesToDownload(),
+        offlineProgress: OfflineMessageHandler.getOfflineDeliveryProgress(),
+      }
+    })
+    return res.json({ success: true, state })
+  } catch (error) {
+    sendErrorResponse(res, 500, error)
+  }
+}
+
 module.exports = {
   getClassInfo,
+  getHistorySyncState,
   acceptInvite,
   archiveChat,
   createGroup,

@@ -6,11 +6,59 @@ const Client = require('whatsapp-web.js').Client
 const { Chat, Message } = require('whatsapp-web.js/src/structures')
 
 // Trigger webhook endpoint
-const triggerWebhook = (webhookURL, sessionId, dataType, data) => {
-  if (enableWebHook) {
-    axios.post(webhookURL, { dataType, data, sessionId }, { headers: { 'x-api-key': globalApiKey } })
-      .then(() => logger.debug({ sessionId, dataType, data: data || '' }, `Webhook message sent to ${webhookURL}`))
-      .catch(error => logger.error({ sessionId, dataType, err: error, data: data || '' }, `Failed to send webhook message to ${webhookURL}`))
+const WEBHOOK_MAX_ATTEMPTS = 3
+const WEBHOOK_RETRY_DELAYS_MS = [100, 300]
+const WEBHOOK_REQUEST_TIMEOUT_MS = 5000
+const TRANSIENT_WEBHOOK_ERROR_CODES = new Set([
+  'ECONNABORTED',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'ERR_NETWORK'
+])
+
+const isRetryableWebhookError = error => {
+  const status = error && error.response && error.response.status
+  if (Number.isInteger(status)) return status >= 500 && status < 600
+  const code = error && (error.code || (error.cause && error.cause.code))
+  return TRANSIENT_WEBHOOK_ERROR_CODES.has(code)
+}
+
+const waitForWebhookRetry = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+const triggerWebhook = async (webhookURL, sessionId, dataType, data) => {
+  if (!enableWebHook) return
+
+  for (let attempt = 1; attempt <= WEBHOOK_MAX_ATTEMPTS; attempt++) {
+    try {
+      await axios.post(
+        webhookURL,
+        { dataType, data, sessionId },
+        {
+          headers: { 'x-api-key': globalApiKey },
+          timeout: WEBHOOK_REQUEST_TIMEOUT_MS
+        }
+      )
+      logger.debug({ sessionId, dataType, data: data || '' }, `Webhook message sent to ${webhookURL}`)
+      return
+    } catch (error) {
+      const retryable = isRetryableWebhookError(error)
+      if (!retryable || attempt === WEBHOOK_MAX_ATTEMPTS) {
+        logger.error(
+          { sessionId, dataType, attempt, err: error, data: data || '' },
+          `Failed to send webhook message to ${webhookURL}`
+        )
+        return
+      }
+      logger.warn(
+        { sessionId, dataType, attempt, err: error },
+        `Transient webhook delivery failure; retrying ${webhookURL}`
+      )
+      await waitForWebhookRetry(WEBHOOK_RETRY_DELAYS_MS[attempt - 1])
+    }
   }
 }
 
@@ -78,6 +126,122 @@ const exposeFunctionIfAbsent = async (page, name, fn) => {
     return
   }
   await page.exposeFunction(name, fn)
+}
+
+Chat.prototype.fetchMessagesPage = async function (options) {
+  const pagingOptions = {
+    lowerTimestamp: 0,
+    upperTimestamp: Number.MAX_SAFE_INTEGER,
+    before: null,
+    pageSize: 200,
+    ...options
+  }
+  return await this.client.pupPage.evaluate(async (chatId, options) => {
+    const loader = window.require('WAWebChatLoadMessages')
+    const chat = await window.WWebJS.getChat(chatId, { getAsModel: false })
+    const messageId = message => String(message.id.id)
+    const timestamp = message => Number(message.t)
+    const messageKey = message => `${timestamp(message)}:${messageId(message)}`
+    const models = () => chat.msgs.getModelsArray().filter(message => !message.isNotification)
+    const mergeEarlier = earlier => {
+      const unique = new Map()
+      for (const message of [...models(), ...(earlier || [])]) {
+        if (!message.isNotification) unique.set(messageKey(message), message)
+      }
+      return [...unique.values()]
+    }
+    const oldestTimestamp = messages => {
+      let oldest = null
+      for (const message of messages) {
+        oldest = oldest === null ? timestamp(message) : Math.min(oldest, timestamp(message))
+      }
+      return oldest
+    }
+    const isOlderThanCursor = message => (
+      timestamp(message) < options.before.timestamp ||
+      (timestamp(message) === options.before.timestamp && messageId(message) < options.before.messageId)
+    )
+    const isPositioned = messages => options.before
+      ? messages.some(message => (
+        (timestamp(message) === options.before.timestamp && messageId(message) === options.before.messageId) ||
+        timestamp(message) < options.before.timestamp
+      ))
+      : messages.some(message => timestamp(message) <= options.upperTimestamp)
+
+    let loaded = models()
+    if (!isPositioned(loaded)) {
+      const earlier = await loader.loadEarlierMsgs({ chat })
+      loaded = mergeEarlier(earlier)
+      if (!isPositioned(loaded)) {
+        if (!earlier || !earlier.length) {
+          if (!options.before) {
+            return {
+              state: 'PAGE',
+              messages: [],
+              nextBefore: null,
+              done: true,
+              reason: 'end_of_local_history'
+            }
+          }
+          return {
+            state: 'CURSOR_UNREACHABLE',
+            messages: [],
+            progressOldestTimestamp: oldestTimestamp(loaded)
+          }
+        }
+        return {
+          state: 'SEEKING',
+          messages: [],
+          progressOldestTimestamp: oldestTimestamp(loaded)
+        }
+      }
+      return {
+        state: 'POSITIONED',
+        messages: [],
+        progressOldestTimestamp: oldestTimestamp(loaded)
+      }
+    }
+
+    const candidates = messages => messages
+      .filter(message => (
+        timestamp(message) >= options.lowerTimestamp &&
+        timestamp(message) <= options.upperTimestamp &&
+        (!options.before || isOlderThanCursor(message))
+      ))
+      .sort((left, right) => (
+        timestamp(right) - timestamp(left) || messageId(right).localeCompare(messageId(left))
+      ))
+
+    let eligible = candidates(loaded)
+    let providerStalled = false
+    let crossedLowerBound = loaded.some(message => timestamp(message) < options.lowerTimestamp)
+    if (eligible.length < options.pageSize && !crossedLowerBound) {
+      const loadedKeys = new Set(loaded.map(messageKey))
+      const earlier = await loader.loadEarlierMsgs({ chat })
+      providerStalled = !earlier || !earlier.length
+      loaded = mergeEarlier(earlier)
+      if (!providerStalled && !loaded.some(message => !loadedKeys.has(messageKey(message)))) {
+        providerStalled = true
+      }
+      eligible = candidates(loaded)
+      crossedLowerBound = loaded.some(message => timestamp(message) < options.lowerTimestamp)
+    }
+
+    const page = eligible.slice(0, options.pageSize)
+    const cursorMessage = page.at(-1)
+    const done = eligible.length <= page.length && (crossedLowerBound || providerStalled)
+    return {
+      state: 'PAGE',
+      messages: page.map(message => window.WWebJS.getMessageModel(message)),
+      nextBefore: cursorMessage
+        ? { timestamp: timestamp(cursorMessage), messageId: messageId(cursorMessage) }
+        : null,
+      done,
+      reason: done
+        ? crossedLowerBound ? 'lower_bound' : 'end_of_local_history'
+        : 'page_full'
+    }
+  }, this.id._serialized, pagingOptions)
 }
 
 const patchWWebLibrary = async (client) => {
