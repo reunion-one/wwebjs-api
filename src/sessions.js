@@ -4,6 +4,7 @@ const path = require('path')
 const sessions = new Map()
 const { baseWebhookURL, sessionFolderPath, maxAttachmentSize, setMessagesAsSeen, webVersion, webVersionCacheType, recoverSessions, chromeBin, headless, releaseBrowserLock, proxyUrl, proxyUsername, proxyPassword } = require('./config')
 const { triggerWebhook, waitForNestedObject, isEventEnabled, sendMessageSeenStatus, sleep, patchWWebLibrary } = require('./utils')
+const { emitCanonicalMessageCreate } = require('./messageCreateIngress')
 const { logger } = require('./logger')
 const { initWebSocketServer, terminateWebSocketServer, triggerWebSocket } = require('./websocket')
 
@@ -331,17 +332,6 @@ const initializeEvents = (client, sessionId) => {
     if (isEventEnabled('message')) {
       triggerWebhook(sessionWebhook, sessionId, 'message', { message })
       triggerWebSocket(sessionId, 'message', { message })
-      if (message.hasMedia && message._data?.size < maxAttachmentSize) {
-      // custom service event
-        if (isEventEnabled('media')) {
-          message.downloadMedia().then(messageMedia => {
-            triggerWebhook(sessionWebhook, sessionId, 'media', { messageMedia, message })
-            triggerWebSocket(sessionId, 'media', { messageMedia, message })
-          }).catch(error => {
-            logger.error({ sessionId, err: error }, 'Failed to download media')
-          })
-        }
-      }
     }
     if (setMessagesAsSeen) {
       // small delay to ensure the message is processed before sending seen status
@@ -358,9 +348,16 @@ const initializeEvents = (client, sessionId) => {
   }
 
   if (isEventEnabled('message_create')) {
-    client.on('message_create', (message) => {
-      triggerWebhook(sessionWebhook, sessionId, 'message_create', { message })
-      triggerWebSocket(sessionId, 'message_create', { message })
+    client.on('message_create', async (message) => {
+      await emitCanonicalMessageCreate({
+        message,
+        sessionId,
+        sessionWebhook,
+        maxAttachmentSize,
+        triggerWebhook,
+        triggerWebSocket,
+        logger
+      })
     })
   }
 
