@@ -329,19 +329,11 @@ const initializeEvents = (client, sessionId) => {
 
   client.on('message', async (message) => {
     if (isEventEnabled('message')) {
+      // Preserve the ordinary provider callback for observers, but do not use it
+      // as a second canonical media writer. Complete canonical ingress belongs
+      // exclusively to message_create below.
       triggerWebhook(sessionWebhook, sessionId, 'message', { message })
       triggerWebSocket(sessionId, 'message', { message })
-      if (message.hasMedia && message._data?.size < maxAttachmentSize) {
-      // custom service event
-        if (isEventEnabled('media')) {
-          message.downloadMedia().then(messageMedia => {
-            triggerWebhook(sessionWebhook, sessionId, 'media', { messageMedia, message })
-            triggerWebSocket(sessionId, 'media', { messageMedia, message })
-          }).catch(error => {
-            logger.error({ sessionId, err: error }, 'Failed to download media')
-          })
-        }
-      }
     }
     if (setMessagesAsSeen) {
       // small delay to ensure the message is processed before sending seen status
@@ -358,9 +350,42 @@ const initializeEvents = (client, sessionId) => {
   }
 
   if (isEventEnabled('message_create')) {
-    client.on('message_create', (message) => {
-      triggerWebhook(sessionWebhook, sessionId, 'message_create', { message })
-      triggerWebSocket(sessionId, 'message_create', { message })
+    client.on('message_create', async (message) => {
+      const completeEvent = { message }
+
+      if (message.hasMedia) {
+        try {
+          const messageMedia = await message.downloadMedia()
+          const declaredSize = Number(
+            messageMedia?.filesize ?? messageMedia?.size ?? message._data?.size
+          )
+          const usableMedia = Boolean(
+            messageMedia &&
+            typeof messageMedia.data === 'string' &&
+            messageMedia.data.length > 0 &&
+            (!Number.isFinite(declaredSize) || declaredSize <= maxAttachmentSize)
+          )
+
+          if (!usableMedia) {
+            logger.error(
+              { sessionId, messageId: message.id?._serialized ?? message.id?.id },
+              'Skipping incomplete message_create media event'
+            )
+            return
+          }
+
+          completeEvent.messageMedia = messageMedia
+        } catch (error) {
+          logger.error(
+            { sessionId, err: error, messageId: message.id?._serialized ?? message.id?.id },
+            'Failed to complete message_create media event'
+          )
+          return
+        }
+      }
+
+      triggerWebhook(sessionWebhook, sessionId, 'message_create', completeEvent)
+      triggerWebSocket(sessionId, 'message_create', completeEvent)
     })
   }
 
