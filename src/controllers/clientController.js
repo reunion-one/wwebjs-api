@@ -178,6 +178,39 @@ const isRegisteredUser = async (req, res) => {
 }
 
 /**
+ * Find phone-number occurrences in arbitrary text using WhatsApp Web's own parser.
+ *
+ * @async
+ * @function findPhoneNumbers
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {string} req.params.sessionId - Active session id
+ * @param {string} req.body.text - Arbitrary text to scan
+ * @returns {Object} Phone occurrences with phone, index and canonicalPhone
+ */
+const findPhoneNumbers = async (req, res) => {
+  try {
+    const { text } = req.body
+    if (typeof text !== 'string') {
+      return res.status(400).json({ success: false, error: 'text must be a string' })
+    }
+
+    const client = sessions.get(req.params.sessionId)
+    const result = await client.pupPage.evaluate((body) => {
+      const { findPhoneNumbers: find } = window.require('WAWebHelpersFindPhoneNumbers')
+      return find(body).map(({ phone, index, canonicalPhone }) => ({
+        phone,
+        index,
+        canonicalPhone
+      }))
+    }, text)
+    res.json({ success: true, result })
+  } catch (error) {
+    sendErrorResponse(res, 500, error)
+  }
+}
+
+/**
  * Retrieves the registered WhatsApp ID for a number
  *
  * @async
@@ -2286,6 +2319,7 @@ module.exports = {
   getLabels,
   addOrRemoveLabels,
   isRegisteredUser,
+  findPhoneNumbers,
   getNumberId,
   getProfilePictureUrl,
   getState,
