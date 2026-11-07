@@ -60,6 +60,53 @@ describe('production-consumed WWebJS controller success contracts', () => {
     })
   })
 
+  test('getHistorySyncState reports false passive gates before resume modules are ready', async () => {
+    global.window = {
+      require: name => {
+        if (name === 'WAWebSocketModel') {
+          return { Socket: { hasSynced: false, state: 'UNPAIRED_IDLE' } }
+        }
+        if (name === 'WAWebBackendEventBus') {
+          return {}
+        }
+        if (name === 'WAWebOfflineHandler') {
+          return {
+            OfflineMessageHandler: {
+              isResumeComplete: () => {
+                throw new Error('resume state unavailable')
+              },
+              getHasMessagesToDownload: () => {
+                throw new Error('download state unavailable')
+              },
+              getOfflineDeliveryProgress: () => {
+                throw new Error('progress unavailable')
+              }
+            }
+          }
+        }
+        throw new Error('Unexpected module: ' + name)
+      }
+    }
+    const evaluate = jest.fn(async fn => await fn())
+    sessions.set('test', { pupPage: { evaluate } })
+    const res = responseDouble()
+
+    await clientController.getHistorySyncState({ params: { sessionId: 'test' } }, res)
+
+    expect(res.json).toHaveBeenCalledWith({
+      success: true,
+      state: {
+        ready: false,
+        hasSynced: false,
+        connectionState: 'UNPAIRED_IDLE',
+        isOfflineDeliveryEnd: false,
+        isResumeComplete: false,
+        hasMessagesToDownload: null,
+        offlineProgress: null
+      }
+    })
+  })
+
   test('POST getChats forwards searchOptions and preserves chat response shape', async () => {
     const chats = [{ id: { _serialized: 'chat-1@g.us' }, timestamp: 123 }]
     const getChats = jest.fn(async () => chats)

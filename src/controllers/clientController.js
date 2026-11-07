@@ -2280,17 +2280,28 @@ const getHistorySyncState = async (req, res) => {
       })
     }
     const state = await client.pupPage.evaluate(() => {
-      const Socket = window.require('WAWebSocketModel').Socket
-      const BackendEventBus = window.require('WAWebBackendEventBus').BackendEventBus
-      const OfflineMessageHandler = window.require('WAWebOfflineHandler').OfflineMessageHandler
+      const safeRead = (read, fallback) => {
+        try {
+          return read()
+        } catch {
+          return fallback
+        }
+      }
+      const Socket = safeRead(() => window.require('WAWebSocketModel')?.Socket, null)
+      const BackendEventBus = safeRead(() => window.require('WAWebBackendEventBus')?.BackendEventBus, null)
+      const OfflineMessageHandler = safeRead(() => window.require('WAWebOfflineHandler')?.OfflineMessageHandler, null)
+      const hasSynced = safeRead(() => Socket?.hasSynced === true, false)
+      const connectionState = safeRead(() => Socket?.state ?? null, null)
+      const isOfflineDeliveryEnd = safeRead(() => BackendEventBus?.isOfflineDeliveryEnd === true, false)
+      const isResumeComplete = safeRead(() => OfflineMessageHandler?.isResumeComplete?.() === true, false)
       return {
-        ready: Socket.hasSynced === true && Socket.state === 'CONNECTED' && typeof window.WWebJS !== 'undefined',
-        hasSynced: Socket.hasSynced === true,
-        connectionState: Socket.state ?? null,
-        isOfflineDeliveryEnd: BackendEventBus.isOfflineDeliveryEnd === true,
-        isResumeComplete: OfflineMessageHandler.isResumeComplete() === true,
-        hasMessagesToDownload: OfflineMessageHandler.getHasMessagesToDownload(),
-        offlineProgress: OfflineMessageHandler.getOfflineDeliveryProgress(),
+        ready: hasSynced && connectionState === 'CONNECTED' && typeof window.WWebJS !== 'undefined',
+        hasSynced,
+        connectionState,
+        isOfflineDeliveryEnd,
+        isResumeComplete,
+        hasMessagesToDownload: safeRead(() => OfflineMessageHandler?.getHasMessagesToDownload?.() ?? null, null),
+        offlineProgress: safeRead(() => OfflineMessageHandler?.getOfflineDeliveryProgress?.() ?? null, null),
       }
     })
     return res.json({ success: true, state })

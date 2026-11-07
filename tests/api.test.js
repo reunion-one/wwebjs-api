@@ -3,6 +3,7 @@ const request = require('supertest')
 
 jest.mock('../src/sessions', () => ({
   sessions: new Map(),
+  initializingSessions: new Map(),
   setupSession: jest.fn(),
   deleteSession: jest.fn(),
   reloadSession: jest.fn(),
@@ -24,6 +25,7 @@ const configuredRequest = (method, pathname) => {
 
 beforeEach(() => {
   sessionsModule.sessions.clear()
+  sessionsModule.initializingSessions.clear()
   jest.clearAllMocks()
   sessionsModule.validateSession.mockResolvedValue({
     success: false,
@@ -138,6 +140,15 @@ describe('API session route/controller contracts with mocked lifecycle boundarie
 
     expect(response.status).toBe(200)
     expect(response.body).toEqual({ success: true, result: ['one', 'two'] })
+  })
+
+  it('serves QR from a session that is still initializing', async () => {
+    sessionsModule.initializingSessions.set('unit-test', { qr: 'test-qr-value' })
+
+    const response = await configuredRequest('get', '/session/qr/unit-test')
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ success: true, qr: 'test-qr-value' })
   })
 
   it('returns session_not_found for read-only QR/status-like routes with no session', async () => {

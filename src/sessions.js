@@ -2,6 +2,7 @@ const { Client, LocalAuth } = require('whatsapp-web.js')
 const fs = require('fs')
 const path = require('path')
 const sessions = new Map()
+const initializingSessions = new Map()
 const { baseWebhookURL, sessionFolderPath, maxAttachmentSize, setMessagesAsSeen, webVersion, webVersionCacheType, recoverSessions, chromeBin, headless, releaseBrowserLock, proxyUrl, proxyUsername, proxyPassword } = require('./config')
 const { triggerWebhook, waitForNestedObject, isEventEnabled, sendMessageSeenStatus, sleep, patchWWebLibrary } = require('./utils')
 const { logger } = require('./logger')
@@ -12,13 +13,13 @@ const validateSession = async (sessionId) => {
   try {
     const returnData = { success: false, state: null, message: '' }
 
-    // Session not Connected 😢
-    if (!sessions.has(sessionId) || !sessions.get(sessionId)) {
+    // Initialized sessions and sessions currently waiting for authentication
+    // are both observable through the status/QR API.
+    const client = sessions.get(sessionId) || initializingSessions.get(sessionId)
+    if (!client) {
       returnData.message = 'session_not_found'
       return returnData
     }
-
-    const client = sessions.get(sessionId)
     // wait until the client is created
     await waitForNestedObject(client, 'pupPage')
       .catch((err) => { return { success: false, state: null, message: err.message } })
@@ -87,8 +88,9 @@ const restoreSessions = () => {
 // Setup Session
 const setupSession = async (sessionId) => {
   try {
-    if (sessions.has(sessionId)) {
-      return { success: false, message: `Session already exists for: ${sessionId}`, client: sessions.get(sessionId) }
+    const existingClient = sessions.get(sessionId) || initializingSessions.get(sessionId)
+    if (existingClient) {
+      return { success: false, message: `Session already exists for: ${sessionId}`, client: existingClient }
     }
     logger.info({ sessionId }, 'Session is being initiated')
     // Disable the delete folder from the logout function (will be handled separately)
@@ -174,6 +176,7 @@ const setupSession = async (sessionId) => {
     }
 
     const client = new Client(clientOptions)
+    initializingSessions.set(sessionId, client)
     if (releaseBrowserLock) {
       // See https://github.com/puppeteer/puppeteer/issues/4860
       const singletonLockPath = path.resolve(path.join(sessionFolderPath, `session-${sessionId}`, 'SingletonLock'))
@@ -195,10 +198,24 @@ const setupSession = async (sessionId) => {
       await client.initialize()
     } catch (error) {
       logger.error({ sessionId, err: error }, 'Initialize error')
+      client.pupPage?.removeAllListeners('close')
+      client.pupPage?.removeAllListeners('error')
+      try {
+        await terminateWebSocketServer(sessionId)
+      } catch (cleanupError) {
+        logger.error({ sessionId, err: cleanupError }, 'Failed to terminate WebSocket server after initialize error')
+      }
+      try {
+        await client.destroy()
+      } catch (cleanupError) {
+        logger.error({ sessionId, err: cleanupError }, 'Failed to destroy client after initialize error')
+      }
+      initializingSessions.delete(sessionId)
       throw error
     }
 
-    // Save the session to the Map
+    // Initialization completed: promote the client to the normal session map.
+    initializingSessions.delete(sessionId)
     sessions.set(sessionId, client)
     return { success: true, message: 'Session initiated successfully', client }
   } catch (error) {
@@ -538,7 +555,7 @@ const reloadSession = async (sessionId) => {
 
 const destroySession = async (sessionId) => {
   try {
-    const client = sessions.get(sessionId)
+    const client = sessions.get(sessionId) || initializingSessions.get(sessionId)
     if (!client) {
       return
     }
@@ -557,6 +574,7 @@ const destroySession = async (sessionId) => {
       maxDelay++
     }
     sessions.delete(sessionId)
+    initializingSessions.delete(sessionId)
   } catch (error) {
     logger.error({ sessionId, err: error }, 'Failed to stop session')
     throw error
@@ -624,6 +642,7 @@ const flushSessions = async (deleteOnlyInactive) => {
 
 module.exports = {
   sessions,
+  initializingSessions,
   setupSession,
   restoreSessions,
   validateSession,

@@ -1,5 +1,5 @@
 const qr = require('qr-image')
-const { setupSession, deleteSession, reloadSession, validateSession, flushSessions, destroySession, sessions } = require('../sessions')
+const { setupSession, deleteSession, reloadSession, validateSession, flushSessions, destroySession, sessions, initializingSessions } = require('../sessions')
 const { sendErrorResponse, waitForNestedObject, exposeFunctionIfAbsent } = require('../utils')
 const { logger } = require('../logger')
 
@@ -133,7 +133,7 @@ const sessionQrCode = async (req, res) => {
   // #swagger.description = 'QR code of the session with the given session ID.'
   const sessionId = req.params.sessionId
   try {
-    const session = sessions.get(sessionId)
+    const session = sessions.get(sessionId) || initializingSessions.get(sessionId)
     if (!session) {
       return res.json({ success: false, message: 'session_not_found' })
     }
@@ -165,7 +165,7 @@ const sessionQrCodeImage = async (req, res) => {
   // #swagger.description = 'QR code as image of the session with the given session ID.'
   const sessionId = req.params.sessionId
   try {
-    const session = sessions.get(sessionId)
+    const session = sessions.get(sessionId) || initializingSessions.get(sessionId)
     if (!session) {
       return res.json({ success: false, message: 'session_not_found' })
     }
@@ -422,7 +422,7 @@ const getPageScreenshot = async (req, res) => {
   // #swagger.description = 'Screenshot of the client with the given session ID.'
   const sessionId = req.params.sessionId
   try {
-    const session = sessions.get(sessionId)
+    const session = sessions.get(sessionId) || initializingSessions.get(sessionId)
     if (!session) {
       return res.json({ success: false, message: 'session_not_found' })
     }
