@@ -9,6 +9,67 @@ const { logger } = require('./logger')
 const { initWebSocketServer, terminateWebSocketServer, triggerWebSocket } = require('./websocket')
 
 // Function to validate if the session is ready
+const SEND_SESSION_READY_ATTEMPTS = 150
+const SEND_SESSION_READY_POLL_MS = 100
+
+const validateSendSession = async (sessionId) => {
+  const client = sessions.get(sessionId)
+  if (!client) {
+    return {
+      success: false,
+      state: null,
+      message: initializingSessions.has(sessionId) ? 'session_not_connected' : 'session_not_found'
+    }
+  }
+  if (!client.pupPage || client.pupPage.isClosed()) {
+    return { success: false, state: null, message: 'session closed' }
+  }
+
+  let lastState = null
+  for (let attempt = 0; attempt < SEND_SESSION_READY_ATTEMPTS; attempt++) {
+    try {
+      const readiness = await client.pupPage.evaluate(() => {
+        let state = null
+        try {
+          state = window.require('WAWebSocketModel')?.Socket?.state ?? null
+        } catch {
+          state = null
+        }
+        const bridge = window.WWebJS
+        return {
+          state,
+          ready: state === 'CONNECTED' &&
+            typeof bridge !== 'undefined' &&
+            typeof bridge.getChat === 'function' &&
+            typeof bridge.sendMessage === 'function'
+        }
+      })
+      lastState = readiness.state
+
+      if (readiness.ready) {
+        return { success: true, state: 'CONNECTED', message: 'session_connected' }
+      }
+      if (readiness.state && readiness.state !== 'CONNECTED') {
+        return { success: false, state: readiness.state, message: 'session_not_connected' }
+      }
+    } catch (error) {
+      if (client.pupPage.isClosed()) {
+        return { success: false, state: lastState, message: 'browser tab closed' }
+      }
+      // Top-frame navigation destroys the current execution context while
+      // whatsapp-web.js is reinjecting window.WWebJS. Keep the request bounded
+      // inside the local wrapper instead of letting a provider send race that
+      // temporary gap.
+    }
+
+    if (attempt < SEND_SESSION_READY_ATTEMPTS - 1) {
+      await sleep(SEND_SESSION_READY_POLL_MS)
+    }
+  }
+
+  return { success: false, state: lastState, message: 'session_send_not_ready' }
+}
+
 const validateSession = async (sessionId) => {
   try {
     const returnData = { success: false, state: null, message: '' }
@@ -646,6 +707,7 @@ module.exports = {
   setupSession,
   restoreSessions,
   validateSession,
+  validateSendSession,
   deleteSession,
   reloadSession,
   flushSessions,

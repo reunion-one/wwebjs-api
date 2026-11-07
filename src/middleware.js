@@ -1,6 +1,6 @@
 const { globalApiKey, rateLimitMax, rateLimitWindowMs } = require('./config')
 const { sendErrorResponse } = require('./utils')
-const { validateSession } = require('./sessions')
+const { validateSession, validateSendSession } = require('./sessions')
 const rateLimiting = require('express-rate-limit')
 
 const apikey = async (req, res, next) => {
@@ -64,6 +64,14 @@ const sessionValidation = async (req, res, next) => {
         }
       }
     */
+    return sendErrorResponse(res, 404, validation.message)
+  }
+  next()
+}
+
+const sendSessionValidation = async (req, res, next) => {
+  const validation = await validateSendSession(req.params.sessionId)
+  if (validation.success !== true) {
     return sendErrorResponse(res, 404, validation.message)
   }
   next()
@@ -235,6 +243,7 @@ const channelSwagger = async (req, res, next) => {
 
 module.exports = {
   sessionValidation,
+  sendSessionValidation,
   apikey,
   sessionNameValidation,
   sessionSwagger,

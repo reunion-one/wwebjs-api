@@ -8,6 +8,7 @@ jest.mock('../src/sessions', () => ({
   deleteSession: jest.fn(),
   reloadSession: jest.fn(),
   validateSession: jest.fn(),
+  validateSendSession: jest.fn(),
   flushSessions: jest.fn(),
   destroySession: jest.fn()
 }))
@@ -28,6 +29,11 @@ beforeEach(() => {
   sessionsModule.initializingSessions.clear()
   jest.clearAllMocks()
   sessionsModule.validateSession.mockResolvedValue({
+    success: false,
+    state: null,
+    message: 'session_not_found'
+  })
+  sessionsModule.validateSendSession.mockResolvedValue({
     success: false,
     state: null,
     message: 'session_not_found'
@@ -173,6 +179,27 @@ describe('API session route/controller contracts with mocked lifecycle boundarie
     expect(all.status).toBe(200)
     expect(all.body).toEqual({ success: true, message: 'Flush completed successfully' })
     expect(sessionsModule.flushSessions).toHaveBeenNthCalledWith(2, false)
+  })
+})
+
+describe('Send route readiness boundary', () => {
+  it.each([
+    ['/client/sendMessage/unit-test', { chatId: '123@c.us', contentType: 'string', content: 'hello' }],
+    ['/message/reply/unit-test', { chatId: '123@c.us', messageId: 'message-id', content: 'hello' }],
+    ['/channel/sendMessage/unit-test', { chatId: '123@c.us', contentType: 'string', content: 'hello' }]
+  ])('uses send-session readiness for %s', async (pathname, body) => {
+    sessionsModule.validateSendSession.mockResolvedValue({
+      success: false,
+      state: 'CONNECTED',
+      message: 'session_send_not_ready'
+    })
+
+    const response = await configuredRequest('post', pathname).send(body)
+
+    expect(response.status).toBe(404)
+    expect(response.body).toEqual({ success: false, error: 'session_send_not_ready' })
+    expect(sessionsModule.validateSendSession).toHaveBeenCalledWith('unit-test')
+    expect(sessionsModule.validateSession).not.toHaveBeenCalled()
   })
 })
 
