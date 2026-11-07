@@ -139,3 +139,166 @@ test('REST endpoint treats all paging controls as optional', async () => {
   }))
   sessions.delete('test')
 })
+
+test('returns CURSOR_UNREACHABLE when provider history ends before the cursor can be positioned', async () => {
+  const models = [message(300, 'm300'), message(290, 'm290')]
+  const loadEarlierMsgs = jest.fn(async () => [])
+  global.window = {
+    WWebJS: {
+      getChat: async () => ({ msgs: { getModelsArray: () => models } }),
+      getMessageModel: item => ({ id: item.id, timestamp: item.t })
+    },
+    require: name => {
+      if (name === 'WAWebChatLoadMessages') return { loadEarlierMsgs }
+      throw new Error('Unexpected module: ' + name)
+    }
+  }
+
+  const pupPage = { evaluate: async (fn, ...args) => await fn(...args) }
+  const chat = { client: { pupPage }, id: { _serialized: 'chat@g.us' } }
+  const result = await Chat.prototype.fetchMessagesPage.call(chat, {
+    lowerTimestamp: 1,
+    upperTimestamp: 400,
+    before: { timestamp: 100, messageId: 'cursor' },
+    pageSize: 10
+  })
+
+  expect(result).toEqual({
+    state: 'CURSOR_UNREACHABLE',
+    messages: [],
+    progressOldestTimestamp: 290
+  })
+  expect(loadEarlierMsgs).toHaveBeenCalledTimes(1)
+  delete global.window
+})
+
+test('completes at the lower bound without returning messages below it', async () => {
+  let models = [message(150, 'm150'), message(140, 'm140')]
+  const loadEarlierMsgs = jest.fn(async () => {
+    const earlier = [message(99, 'm99')]
+    models = [...models, ...earlier]
+    return earlier
+  })
+  global.window = {
+    WWebJS: {
+      getChat: async () => ({ msgs: { getModelsArray: () => models } }),
+      getMessageModel: item => ({ id: item.id, timestamp: item.t })
+    },
+    require: name => {
+      if (name === 'WAWebChatLoadMessages') return { loadEarlierMsgs }
+      throw new Error('Unexpected module: ' + name)
+    }
+  }
+
+  const pupPage = { evaluate: async (fn, ...args) => await fn(...args) }
+  const chat = { client: { pupPage }, id: { _serialized: 'chat@g.us' } }
+  const result = await Chat.prototype.fetchMessagesPage.call(chat, {
+    lowerTimestamp: 100,
+    upperTimestamp: 200,
+    before: null,
+    pageSize: 5
+  })
+
+  expect(result).toMatchObject({
+    state: 'PAGE',
+    done: true,
+    reason: 'lower_bound',
+    nextBefore: { timestamp: 140, messageId: 'm140' }
+  })
+  expect(result.messages.map(item => item.id.id)).toEqual(['m150', 'm140'])
+  expect(loadEarlierMsgs).toHaveBeenCalledTimes(1)
+  delete global.window
+})
+
+test('terminates a page when provider loading reports no new message key', async () => {
+  const models = [message(150, 'm150'), message(140, 'm140')]
+  const loadEarlierMsgs = jest.fn(async () => [message(140, 'm140')])
+  global.window = {
+    WWebJS: {
+      getChat: async () => ({ msgs: { getModelsArray: () => models } }),
+      getMessageModel: item => ({ id: item.id, timestamp: item.t })
+    },
+    require: name => {
+      if (name === 'WAWebChatLoadMessages') return { loadEarlierMsgs }
+      throw new Error('Unexpected module: ' + name)
+    }
+  }
+
+  const pupPage = { evaluate: async (fn, ...args) => await fn(...args) }
+  const chat = { client: { pupPage }, id: { _serialized: 'chat@g.us' } }
+  const result = await Chat.prototype.fetchMessagesPage.call(chat, {
+    lowerTimestamp: 1,
+    upperTimestamp: 200,
+    before: null,
+    pageSize: 5
+  })
+
+  expect(result).toMatchObject({
+    state: 'PAGE',
+    done: true,
+    reason: 'end_of_local_history'
+  })
+  expect(result.messages.map(item => item.id.id)).toEqual(['m150', 'm140'])
+  expect(loadEarlierMsgs).toHaveBeenCalledTimes(1)
+  delete global.window
+})
+
+test('REST endpoint returns 422 for invalid paging controls without calling provider chat lookup', async () => {
+  const getChatById = jest.fn()
+  sessions.set('test', { getChatById })
+  const res = { json: jest.fn(), status: jest.fn() }
+  res.status.mockImplementation(() => res)
+
+  await chatController.fetchMessagesPage(
+    {
+      body: { chatId: 'chat@g.us', pageSize: 0 },
+      params: { sessionId: 'test' }
+    },
+    res
+  )
+
+  expect(getChatById).not.toHaveBeenCalled()
+  expect(res.status).toHaveBeenCalledWith(422)
+  expect(res.json).toHaveBeenCalledWith({
+    success: false,
+    error: 'Invalid bounded message page request'
+  })
+  sessions.delete('test')
+})
+
+test('REST endpoint returns 404 when the requested chat is missing', async () => {
+  const getChatById = jest.fn(async () => undefined)
+  sessions.set('test', { getChatById })
+  const res = { json: jest.fn(), status: jest.fn() }
+  res.status.mockImplementation(() => res)
+
+  await chatController.fetchMessagesPage(
+    { body: { chatId: 'missing@g.us' }, params: { sessionId: 'test' } },
+    res
+  )
+
+  expect(getChatById).toHaveBeenCalledWith('missing@g.us')
+  expect(res.status).toHaveBeenCalledWith(404)
+  expect(res.json).toHaveBeenCalledWith({ success: false, error: 'Chat not Found' })
+  sessions.delete('test')
+})
+
+test('REST endpoint returns 500 when provider paging throws', async () => {
+  const fetchMessagesPage = jest.fn(async () => {
+    throw new Error('provider paging failed')
+  })
+  sessions.set('test', {
+    getChatById: async () => ({ fetchMessagesPage })
+  })
+  const res = { json: jest.fn(), status: jest.fn() }
+  res.status.mockImplementation(() => res)
+
+  await chatController.fetchMessagesPage(
+    { body: { chatId: 'chat@g.us' }, params: { sessionId: 'test' } },
+    res
+  )
+
+  expect(res.status).toHaveBeenCalledWith(500)
+  expect(res.json).toHaveBeenCalledWith({ success: false, error: 'provider paging failed' })
+  sessions.delete('test')
+})

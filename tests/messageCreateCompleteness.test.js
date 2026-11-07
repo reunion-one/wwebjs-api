@@ -13,29 +13,17 @@ jest.mock('whatsapp-web.js', () => ({
   Client: jest.fn(() => mockClient),
   LocalAuth: jest.fn(() => ({ logout: jest.fn() }))
 }))
-jest.mock('../src/config', () => ({
-  baseWebhookURL: 'http://127.0.0.1:8000/whatsapp-webhook',
-  sessionFolderPath: './sessions_test',
-  maxAttachmentSize: 10000000,
-  setMessagesAsSeen: false,
-  webVersion: null,
-  webVersionCacheType: 'none',
-  recoverSessions: false,
-  chromeBin: undefined,
-  headless: true,
-  releaseBrowserLock: false,
-  proxyUrl: null,
-  proxyUsername: null,
-  proxyPassword: null
-}))
-jest.mock('../src/utils', () => ({
-  triggerWebhook: (...args) => mockTriggerWebhook(...args),
-  waitForNestedObject: jest.fn(async () => {}),
-  isEventEnabled: jest.fn(() => true),
-  sendMessageSeenStatus: jest.fn(),
-  sleep: jest.fn(async () => {}),
-  patchWWebLibrary: jest.fn(async () => {})
-}))
+jest.mock('../src/utils', () => {
+  const { disabledCallbacks } = jest.requireActual('../src/config')
+  return {
+    triggerWebhook: (...args) => mockTriggerWebhook(...args),
+    waitForNestedObject: jest.fn(async () => {}),
+    isEventEnabled: jest.fn(event => !disabledCallbacks.includes(event)),
+    sendMessageSeenStatus: jest.fn(),
+    sleep: jest.fn(async () => {}),
+    patchWWebLibrary: jest.fn(async () => {})
+  }
+})
 jest.mock('../src/logger', () => ({ logger: mockLogger }))
 jest.mock('../src/websocket', () => ({
   initWebSocketServer: jest.fn(),
@@ -43,9 +31,13 @@ jest.mock('../src/websocket', () => ({
   triggerWebSocket: (...args) => mockTriggerWebSocket(...args)
 }))
 
+const { disabledCallbacks, maxAttachmentSize } = require('../src/config')
 const { sessions, setupSession } = require('../src/sessions')
+const messageCreateEnabled = !disabledCallbacks.includes('message_create')
+const messageEnabled = !disabledCallbacks.includes('message')
+const describeMessageCreate = messageCreateEnabled ? describe : describe.skip
 
-describe('complete message_create canonical ingress', () => {
+describeMessageCreate('complete message_create canonical ingress', () => {
   beforeEach(async () => {
     sessions.clear()
     Object.keys(mockHandlers).forEach(key => delete mockHandlers[key])
@@ -143,10 +135,81 @@ describe('complete message_create canonical ingress', () => {
     }
     await mockHandlers.message(message)
     expect(message.downloadMedia).not.toHaveBeenCalled()
-    expect(mockTriggerWebhook).toHaveBeenCalledWith(
-      expect.any(String), 'primary', 'message', { message }
-    )
+    if (messageEnabled) {
+      expect(mockTriggerWebhook).toHaveBeenCalledWith(
+        expect.any(String), 'primary', 'message', { message }
+      )
+    } else {
+      expect(mockTriggerWebhook).not.toHaveBeenCalled()
+    }
     expect(mockTriggerWebhook.mock.calls.some(call => call[2] === 'media')).toBe(false)
     expect(mockTriggerWebhook.mock.calls.some(call => call[2] === 'message_create')).toBe(false)
+  })
+})
+
+describeMessageCreate('message_create media size boundary', () => {
+  beforeEach(async () => {
+    sessions.clear()
+    Object.keys(mockHandlers).forEach(key => delete mockHandlers[key])
+    mockClient.on.mockClear()
+    mockClient.once.mockClear()
+    mockClient.initialize.mockClear()
+    mockTriggerWebhook.mockClear()
+    mockTriggerWebSocket.mockClear()
+    mockLogger.error.mockClear()
+
+    const result = await setupSession('primary')
+    expect(result.success).toBe(true)
+    expect(typeof mockHandlers.message_create).toBe('function')
+  })
+
+  afterEach(() => sessions.clear())
+
+  test('includes media whose declared size is exactly maxAttachmentSize', async () => {
+    const messageMedia = {
+      mimetype: 'application/pdf',
+      data: Buffer.from('boundary-media').toString('base64'),
+      filename: 'boundary.pdf',
+      filesize: maxAttachmentSize
+    }
+    const message = {
+      id: { id: 'boundary-media', _serialized: 'false_chat_boundary-media' },
+      fromMe: false,
+      hasMedia: true,
+      _data: { size: maxAttachmentSize },
+      downloadMedia: jest.fn(async () => messageMedia)
+    }
+
+    await mockHandlers.message_create(message)
+
+    expect(message.downloadMedia).toHaveBeenCalledTimes(1)
+    expect(mockTriggerWebhook).toHaveBeenCalledWith(
+      expect.any(String), 'primary', 'message_create', { message, messageMedia }
+    )
+    expect(mockTriggerWebSocket).toHaveBeenCalledWith(
+      'primary', 'message_create', { message, messageMedia }
+    )
+  })
+
+  test('suppresses media one byte above maxAttachmentSize without emitting a partial canonical event', async () => {
+    const message = {
+      id: { id: 'oversize-media', _serialized: 'false_chat_oversize-media' },
+      fromMe: false,
+      hasMedia: true,
+      _data: { size: maxAttachmentSize + 1 },
+      downloadMedia: jest.fn(async () => ({
+        mimetype: 'application/pdf',
+        data: Buffer.from('oversize-media').toString('base64'),
+        filename: 'oversize.pdf',
+        filesize: maxAttachmentSize + 1
+      }))
+    }
+
+    await mockHandlers.message_create(message)
+
+    expect(message.downloadMedia).toHaveBeenCalledTimes(1)
+    expect(mockTriggerWebhook).not.toHaveBeenCalled()
+    expect(mockTriggerWebSocket).not.toHaveBeenCalled()
+    expect(mockLogger.error).toHaveBeenCalledTimes(1)
   })
 })

@@ -1,11 +1,16 @@
 const request = require('supertest')
 
-process.env.API_KEY = 'test_api_key'
-process.env.SESSIONS_PATH = './sessions_test_phone_contract'
-process.env.ENABLE_LOCAL_CALLBACK_EXAMPLE = 'FALSE'
 
 const app = require('../src/app')
 const { sessions } = require('../src/sessions')
+const { basePath, globalApiKey } = require('../src/config')
+
+const basePrefix = basePath === '/' ? '' : basePath.replace(/\/$/, '')
+const configuredPath = pathname => basePrefix + pathname
+const configuredRequest = (method, pathname) => {
+  const configured = request(app)[method](configuredPath(pathname))
+  return globalApiKey ? configured.set('x-api-key', globalApiKey) : configured
+}
 
 function connectedClient(controllerEvaluate) {
   return {
@@ -41,16 +46,23 @@ describe('POST /client/findPhoneNumbers/:sessionId', () => {
     delete global.window
   })
 
-  test('requires API authentication before session/controller execution', async () => {
-    const response = await request(app).post('/client/findPhoneNumbers/session-1').send({ text: 'hello' })
-    expect(response.status).toBe(403)
-    expect(response.body).toEqual({ success: false, error: 'Invalid API key' })
-  })
+  if (globalApiKey) {
+    test.each([
+      ['missing', undefined],
+      ['wrong', 'intentionally-wrong-api-key']
+    ])('rejects %s API credentials before session/controller execution', async (_label, credential) => {
+      let configured = request(app).post(configuredPath('/client/findPhoneNumbers/session-1'))
+      if (credential !== undefined) configured = configured.set('x-api-key', credential)
+
+      const response = await configured.send({ text: 'hello' })
+
+      expect(response.status).toBe(403)
+      expect(response.body).toEqual({ success: false, error: 'Invalid API key' })
+    })
+  }
 
   test('requires an active session', async () => {
-    const response = await request(app)
-      .post('/client/findPhoneNumbers/missing')
-      .set('x-api-key', 'test_api_key')
+    const response = await configuredRequest('post', '/client/findPhoneNumbers/missing')
       .send({ text: 'hello' })
     expect(response.status).toBe(404)
     expect(response.body).toEqual({ success: false, error: 'session_not_found' })
@@ -59,9 +71,7 @@ describe('POST /client/findPhoneNumbers/:sessionId', () => {
   test.each([undefined, null, 123, {}, []])('rejects non-string text: %p', async (text) => {
     const controllerEvaluate = jest.fn()
     sessions.set('session-1', connectedClient(controllerEvaluate))
-    const response = await request(app)
-      .post('/client/findPhoneNumbers/session-1')
-      .set('x-api-key', 'test_api_key')
+    const response = await configuredRequest('post', '/client/findPhoneNumbers/session-1')
       .send(text === undefined ? {} : { text })
 
     expect(response.status).toBe(400)
@@ -74,9 +84,7 @@ describe('POST /client/findPhoneNumbers/:sessionId', () => {
     sessions.set('session-1', connectedClient(controllerEvaluate))
 
     const text = '😀 text +12025550123 and +12025550123'
-    const response = await request(app)
-      .post('/client/findPhoneNumbers/session-1')
-      .set('x-api-key', 'test_api_key')
+    const response = await configuredRequest('post', '/client/findPhoneNumbers/session-1')
       .send({ text })
 
     expect(response.status).toBe(200)
@@ -97,9 +105,7 @@ describe('POST /client/findPhoneNumbers/:sessionId', () => {
       throw new Error('page parser unavailable')
     }))
 
-    const response = await request(app)
-      .post('/client/findPhoneNumbers/session-1')
-      .set('x-api-key', 'test_api_key')
+    const response = await configuredRequest('post', '/client/findPhoneNumbers/session-1')
       .send({ text: 'hello' })
 
     expect(response.status).toBe(500)

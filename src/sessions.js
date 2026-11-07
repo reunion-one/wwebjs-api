@@ -152,23 +152,25 @@ const setupSession = async (sessionId) => {
 
     if (webVersion) {
       clientOptions.webVersion = webVersion
-      switch (webVersionCacheType.toLowerCase()) {
-        case 'local':
-          clientOptions.webVersionCache = {
-            type: 'local'
-          }
-          break
-        case 'remote':
-          clientOptions.webVersionCache = {
-            type: 'remote',
-            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/' + webVersion + '.html'
-          }
-          break
-        default:
-          clientOptions.webVersionCache = {
-            type: 'none'
-          }
-      }
+    }
+
+    switch (webVersionCacheType.toLowerCase()) {
+      case 'local':
+        clientOptions.webVersionCache = {
+          type: 'local'
+        }
+        break
+      case 'remote':
+        clientOptions.webVersionCache = {
+          type: 'remote',
+          remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html'
+        }
+        break
+      case 'none':
+      default:
+        clientOptions.webVersionCache = {
+          type: 'none'
+        }
     }
 
     const client = new Client(clientOptions)

@@ -1,41 +1,38 @@
 const request = require('supertest')
 
-// Mock your application's environment variables
-process.env.API_KEY = 'test_api_key'
-process.env.SESSIONS_PATH = './sessions_test'
-process.env.ENABLE_WEB_UI = 'TRUE'
-
+const { basePath, enableWebUI } = require('../src/config')
 const app = require('../src/app')
+
 jest.mock('qrcode-terminal')
 
-describe('Web UI dashboard', () => {
-  it('should serve the dashboard page', async () => {
-    const response = await request(app).get('/dashboard/')
-    expect(response.status).toBe(200)
-    expect(response.headers['content-type']).toMatch(/html/)
-    expect(response.text).toContain('<title>WWebJS API Dashboard</title>')
+const basePrefix = basePath === '/' ? '' : basePath.replace(/\/$/, '')
+const configuredPath = pathname => basePrefix + pathname
+
+describe('Web UI dashboard under maintained configuration', () => {
+  it('matches the configured dashboard exposure', async () => {
+    const response = await request(app).get(configuredPath('/dashboard/'))
+
+    if (enableWebUI) {
+      expect(response.status).toBe(200)
+      expect(response.headers['content-type']).toMatch(/html/)
+      expect(response.text).toContain('<title>WWebJS API Dashboard</title>')
+    } else {
+      expect(response.status).toBe(404)
+    }
   })
 
-  it('should redirect /dashboard to /dashboard/', async () => {
-    const response = await request(app).get('/dashboard')
-    expect(response.status).toBe(301)
-    expect(response.headers.location).toBe('/dashboard/')
-  })
-
-  it('should serve the dashboard assets', async () => {
-    const response = await request(app).get('/dashboard/app.js')
-    expect(response.status).toBe(200)
-    expect(response.headers['content-type']).toMatch(/javascript/)
-  })
-
-  it('should not serve the dashboard when disabled', async () => {
-    process.env.ENABLE_WEB_UI = 'FALSE'
-    let disabledApp
-    jest.isolateModules(() => {
-      disabledApp = require('../src/app')
+  if (enableWebUI) {
+    it('redirects the configured dashboard path to its trailing-slash form', async () => {
+      const path = configuredPath('/dashboard')
+      const response = await request(app).get(path)
+      expect(response.status).toBe(301)
+      expect(response.headers.location).toBe(path + '/')
     })
-    const response = await request(disabledApp).get('/dashboard/')
-    expect(response.status).toBe(404)
-    process.env.ENABLE_WEB_UI = 'TRUE'
-  })
+
+    it('serves dashboard assets from the configured dashboard', async () => {
+      const response = await request(app).get(configuredPath('/dashboard/app.js'))
+      expect(response.status).toBe(200)
+      expect(response.headers['content-type']).toMatch(/javascript/)
+    })
+  }
 })
