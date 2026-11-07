@@ -1,0 +1,75 @@
+diff --git a/node_modules/whatsapp-web.js/src/Client.js b/node_modules/whatsapp-web.js/src/Client.js
+index 62de539..ceef738 100644
+--- a/node_modules/whatsapp-web.js/src/Client.js
++++ b/node_modules/whatsapp-web.js/src/Client.js
+@@ -298,11 +298,15 @@ class Client extends EventEmitter {
+                      */
+                     this.emit(Events.AUTHENTICATED, authEventPayload);
+ 
+-                    const injected = await this.pupPage.evaluate(async () => {
+-                        return typeof window.WWebJS !== 'undefined';
++                    const injectionState = await this.pupPage.evaluate(() => {
++                        return {
++                            utilsLoaded: typeof window.WWebJS !== 'undefined',
++                            eventBridgeReady:
++                                window.WWebJS?.__eventBridgeReady === true,
++                        };
+                     });
+ 
+-                    if (!injected) {
++                    if (!injectionState.utilsLoaded) {
+                         if (
+                             this.options.webVersionCache.type === 'local' &&
+                             this.currentIndexHtml
+@@ -355,8 +359,13 @@ class Client extends EventEmitter {
+                         );
+ 
+                         this.interface = new InterfaceController(this);
++                    }
+ 
++                    if (!injectionState.eventBridgeReady) {
+                         await this.attachEventListeners();
++                        await this.pupPage.evaluate(() => {
++                            window.WWebJS.__eventBridgeReady = true;
++                        });
+                     }
+                     /**
+                      * Emitted when the client has initialized and is ready to receive messages.
+@@ -387,7 +396,7 @@ class Client extends EventEmitter {
+                         .catch((_) => _);
+                 },
+             );
+-            await this.pupPage.evaluate(() => {
++            await this.pupPage.evaluate(async () => {
+                 const Socket = window.require('WAWebSocketModel').Socket;
+                 const Cmd = window.require('WAWebCmd').Cmd;
+ 
+@@ -448,9 +457,10 @@ class Client extends EventEmitter {
+                 // Atomic hasSynced check in the same synchronous block as listener registration.
+                 // If hasSynced is already true, Backbone won't fire change:hasSynced (no transition).
+                 // If hasSynced is false, the listener above will catch the future transition.
+-                const storeInjected = typeof window.WWebJS !== 'undefined';
+-                if (Socket.hasSynced === true && !storeInjected) {
+-                    window.onAppStateHasSyncedEvent();
++                const eventBridgeReady =
++                    window.WWebJS?.__eventBridgeReady === true;
++                if (Socket.hasSynced === true && !eventBridgeReady) {
++                    await window.onAppStateHasSyncedEvent();
+                 }
+             });
+         } catch (err) {
+@@ -555,11 +565,11 @@ class Client extends EventEmitter {
+                 this.lastLoggedOut = false;
+             }
+ 
+-            const storeAvailable = await this.pupPage.evaluate(() => {
+-                return typeof window.WWebJS !== 'undefined';
++            const eventBridgeReady = await this.pupPage.evaluate(() => {
++                return window.WWebJS?.__eventBridgeReady === true;
+             });
+ 
+-            if (!isLogout && storeAvailable) return;
++            if (!isLogout && eventBridgeReady) return;
+ 
+             await this.inject();
+         });
