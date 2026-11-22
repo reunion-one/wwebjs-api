@@ -1,11 +1,11 @@
 diff --git a/node_modules/whatsapp-web.js/src/Client.js b/node_modules/whatsapp-web.js/src/Client.js
-index 62de539..ceef738 100644
+index 62de539..f00f2bd 100644
 --- a/node_modules/whatsapp-web.js/src/Client.js
 +++ b/node_modules/whatsapp-web.js/src/Client.js
 @@ -298,11 +298,15 @@ class Client extends EventEmitter {
                       */
                      this.emit(Events.AUTHENTICATED, authEventPayload);
- 
+
 -                    const injected = await this.pupPage.evaluate(async () => {
 -                        return typeof window.WWebJS !== 'undefined';
 +                    const injectionState = await this.pupPage.evaluate(() => {
@@ -15,7 +15,7 @@ index 62de539..ceef738 100644
 +                                window.WWebJS?.__eventBridgeReady === true,
 +                        };
                      });
- 
+
 -                    if (!injected) {
 +                    if (!injectionState.utilsLoaded) {
                          if (
@@ -23,10 +23,10 @@ index 62de539..ceef738 100644
                              this.currentIndexHtml
 @@ -355,8 +359,13 @@ class Client extends EventEmitter {
                          );
- 
+
                          this.interface = new InterfaceController(this);
 +                    }
- 
+
 +                    if (!injectionState.eventBridgeReady) {
                          await this.attachEventListeners();
 +                        await this.pupPage.evaluate(() => {
@@ -43,7 +43,7 @@ index 62de539..ceef738 100644
 +            await this.pupPage.evaluate(async () => {
                  const Socket = window.require('WAWebSocketModel').Socket;
                  const Cmd = window.require('WAWebCmd').Cmd;
- 
+
 @@ -448,9 +457,10 @@ class Client extends EventEmitter {
                  // Atomic hasSynced check in the same synchronous block as listener registration.
                  // If hasSynced is already true, Backbone won't fire change:hasSynced (no transition).
@@ -58,18 +58,142 @@ index 62de539..ceef738 100644
                  }
              });
          } catch (err) {
-@@ -555,11 +565,11 @@ class Client extends EventEmitter {
-                 this.lastLoggedOut = false;
+@@ -541,28 +551,88 @@ class Client extends EventEmitter {
+         if (this._framenavigatedRegistered) return;
+         this._framenavigatedRegistered = true;
+
+-        this.pupPage.on('framenavigated', async (frame) => {
++        this.pupPage.on('framenavigated', (frame) => {
+             if (frame.parentFrame() !== null) return;
++            this._pendingFrameNavigation = frame;
++            this._drainFrameNavigationRecovery();
++        });
++    }
++
++    _isNavigationRace(error) {
++        const message = String(error && error.message ? error.message : error);
++        return (
++            message.includes('Execution context was destroyed') ||
++            message.includes('Cannot find context with specified id') ||
++            message.includes('Inspected target navigated or closed')
++        );
++    }
+
+-            const isLogout =
+-                frame.url().includes('post_logout=1') || this.lastLoggedOut;
++    _drainFrameNavigationRecovery() {
++        if (this._frameNavigationRecoveryPromise) return;
+
+-            if (isLogout) {
+-                this.emit(Events.DISCONNECTED, 'LOGOUT');
+-                await this.authStrategy.logout();
+-                await this.authStrategy.beforeBrowserInitialized();
+-                await this.authStrategy.afterBrowserInitialized();
+-                this.lastLoggedOut = false;
++        this._frameNavigationRecoveryPromise = (async () => {
++            while (this._pendingFrameNavigation) {
++                const frame = this._pendingFrameNavigation;
++                this._pendingFrameNavigation = null;
++                // Coalesce authentication/navigation bursts before touching the
++                // new page context. inject() already waits for WhatsApp Web to
++                // expose its bootstrapping globals.
++                await new Promise((resolve) => setTimeout(resolve, 100));
++                await this._recoverFrameNavigation(frame);
              }
- 
++        })()
++            .catch((error) => {
++                this._frameNavigationRecoveryError = error;
++                // A navigation recovery failure must leave the client unready,
++                // not become an unhandled rejection that terminates Node.
++                console.error('WhatsApp Web navigation reinjection failed', error);
++            })
++            .finally(() => {
++                this._frameNavigationRecoveryPromise = null;
++                if (this._pendingFrameNavigation) {
++                    this._drainFrameNavigationRecovery();
++                }
++            });
++    }
++
++    async _recoverFrameNavigation(frame) {
++        const isLogout =
++            frame.url().includes('post_logout=1') || this.lastLoggedOut;
++
++        if (isLogout) {
++            this.emit(Events.DISCONNECTED, 'LOGOUT');
++            await this.authStrategy.logout();
++            await this.authStrategy.beforeBrowserInitialized();
++            await this.authStrategy.afterBrowserInitialized();
++            this.lastLoggedOut = false;
++        }
+
 -            const storeAvailable = await this.pupPage.evaluate(() => {
 -                return typeof window.WWebJS !== 'undefined';
-+            const eventBridgeReady = await this.pupPage.evaluate(() => {
++        let eventBridgeReady = false;
++        try {
++            eventBridgeReady = await this.pupPage.evaluate(() => {
 +                return window.WWebJS?.__eventBridgeReady === true;
              });
- 
++        } catch (error) {
++            if (!this._isNavigationRace(error)) throw error;
++        }
+
 -            if (!isLogout && storeAvailable) return;
-+            if (!isLogout && eventBridgeReady) return;
- 
-             await this.inject();
-         });
++        if (!isLogout && eventBridgeReady) return;
+
+-            await this.inject();
+-        });
++        let lastError = null;
++        for (let attempt = 0; attempt < 3; attempt++) {
++            try {
++                await this.inject();
++                this._frameNavigationRecoveryError = null;
++                return;
++            } catch (error) {
++                lastError = error;
++                if (!this._isNavigationRace(error)) throw error;
++                await new Promise((resolve) =>
++                    setTimeout(resolve, 100 * (attempt + 1)),
++                );
++            }
++        }
++        throw lastError;
+     }
+
+     /**
+diff --git a/node_modules/whatsapp-web.js/src/util/Puppeteer.js b/node_modules/whatsapp-web.js/src/util/Puppeteer.js
+index 54df700..1cada41 100644
+--- a/node_modules/whatsapp-web.js/src/util/Puppeteer.js
++++ b/node_modules/whatsapp-web.js/src/util/Puppeteer.js
+@@ -17,7 +17,30 @@ async function exposeFunctionIfAbsent(page, name, fn) {
+     if (exist) {
+         return;
+     }
+-    await page.exposeFunction(name, fn);
++    try {
++        await page.exposeFunction(name, fn);
++        return;
++    } catch (error) {
++        if (
++            typeof page.removeExposedFunction !== 'function' ||
++            !String(error && error.message).includes('already exists')
++        ) {
++            throw error;
++        }
++    }
++
++    await page.removeExposedFunction(name).catch(() => {});
++    try {
++        await page.exposeFunction(name, fn);
++    } catch (error) {
++        if (String(error && error.message).includes('already exists')) {
++            const visible = await page
++                .evaluate((bindingName) => !!window[bindingName], name)
++                .catch(() => false);
++            if (visible) return;
++        }
++        throw error;
++    }
+ }
+
+ module.exports = { exposeFunctionIfAbsent };

@@ -158,15 +158,49 @@ test('restored session reinjects after partial event attachment without duplicat
     url: () => 'https://web.whatsapp.com/'
   }
 
-  await state.frameHandler(frame)
+  state.frameHandler(frame)
+  await client._frameNavigationRecoveryPromise
 
   expect(fakeWindow.WWebJS.__eventBridgeReady).toBe(true)
   expect(Msg.listenerCount('add')).toBe(1)
   expect(state.readyCount).toBe(1)
 
-  await state.frameHandler(frame)
+  state.frameHandler(frame)
+  await client._frameNavigationRecoveryPromise
 
   expect(Msg.listenerCount('add')).toBe(1)
   expect(state.readyCount).toBe(1)
   expect(state.exposedNames.length).toBeGreaterThan(3)
+})
+
+
+test('authentication navigation retries a destroyed execution context without an unhandled rejection', async () => {
+  let frameHandler = null
+  let evaluateCalls = 0
+  const page = {
+    on(event, handler) {
+      if (event === 'framenavigated') frameHandler = handler
+    },
+    async evaluate() {
+      evaluateCalls += 1
+      if (evaluateCalls === 1) {
+        throw new Error('Execution context was destroyed, most likely because of a navigation.')
+      }
+      return false
+    }
+  }
+
+  const client = new Client()
+  client.pupPage = page
+  client.inject = jest.fn(async () => {})
+  client._registerFramenavigatedHandler()
+
+  frameHandler({
+    parentFrame: () => null,
+    url: () => 'https://web.whatsapp.com/'
+  })
+  await client._frameNavigationRecoveryPromise
+
+  expect(client.inject).toHaveBeenCalledTimes(1)
+  expect(client._frameNavigationRecoveryError).toBeNull()
 })
