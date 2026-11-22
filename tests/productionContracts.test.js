@@ -36,6 +36,11 @@ describe('production-consumed WWebJS controller success contracts', () => {
             }
           }
         }
+        if (name === 'WAWebUserPrefsHistorySync') {
+          return {
+            getHistorySyncStatus: () => ({ recentCompleted: true })
+          }
+        }
         throw new Error(`Unexpected module: ${name}`)
       }
     }
@@ -52,10 +57,12 @@ describe('production-consumed WWebJS controller success contracts', () => {
         ready: true,
         hasSynced: true,
         connectionState: 'CONNECTED',
+        recentCompleted: true,
         isOfflineDeliveryEnd: true,
         isResumeComplete: true,
         hasMessagesToDownload: false,
-        offlineProgress: 100
+        offlineProgress: 100,
+        catchupSourceReady: false
       }
     })
   })
@@ -99,10 +106,12 @@ describe('production-consumed WWebJS controller success contracts', () => {
         ready: false,
         hasSynced: false,
         connectionState: 'UNPAIRED_IDLE',
+        recentCompleted: false,
         isOfflineDeliveryEnd: false,
         isResumeComplete: false,
         hasMessagesToDownload: null,
-        offlineProgress: null
+        offlineProgress: null,
+        catchupSourceReady: false
       }
     })
   })

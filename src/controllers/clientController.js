@@ -1,5 +1,6 @@
 const { MessageMedia, Location, Poll } = require('whatsapp-web.js')
 const { sessions } = require('../sessions')
+const { rawHistorySyncState, getCatchupSourceReady } = require('../catchupSource')
 const { sendErrorResponse } = require('../utils')
 
 /**
@@ -2266,7 +2267,8 @@ const getHistorySyncState = async (req, res) => {
     #swagger.summary = 'Read current WhatsApp history synchronization readiness'
   */
   try {
-    const client = sessions.get(req.params.sessionId)
+    const sessionId = req.params.sessionId
+    const client = sessions.get(sessionId)
     if (!client || !client.pupPage) {
       return res.json({
         success: true,
@@ -2274,37 +2276,31 @@ const getHistorySyncState = async (req, res) => {
           ready: false,
           hasSynced: false,
           connectionState: null,
+          recentCompleted: false,
           isOfflineDeliveryEnd: false,
           isResumeComplete: false,
-        },
+          hasMessagesToDownload: null,
+          offlineProgress: null,
+          catchupSourceReady: false
+        }
       })
     }
-    const state = await client.pupPage.evaluate(() => {
-      const safeRead = (read, fallback) => {
-        try {
-          return read()
-        } catch {
-          return fallback
-        }
-      }
-      const Socket = safeRead(() => window.require('WAWebSocketModel')?.Socket, null)
-      const BackendEventBus = safeRead(() => window.require('WAWebBackendEventBus')?.BackendEventBus, null)
-      const OfflineMessageHandler = safeRead(() => window.require('WAWebOfflineHandler')?.OfflineMessageHandler, null)
-      const hasSynced = safeRead(() => Socket?.hasSynced === true, false)
-      const connectionState = safeRead(() => Socket?.state ?? null, null)
-      const isOfflineDeliveryEnd = safeRead(() => BackendEventBus?.isOfflineDeliveryEnd === true, false)
-      const isResumeComplete = safeRead(() => OfflineMessageHandler?.isResumeComplete?.() === true, false)
-      return {
-        ready: hasSynced && connectionState === 'CONNECTED' && typeof window.WWebJS !== 'undefined',
-        hasSynced,
-        connectionState,
-        isOfflineDeliveryEnd,
-        isResumeComplete,
-        hasMessagesToDownload: safeRead(() => OfflineMessageHandler?.getHasMessagesToDownload?.() ?? null, null),
-        offlineProgress: safeRead(() => OfflineMessageHandler?.getOfflineDeliveryProgress?.() ?? null, null),
+
+    const observed = await rawHistorySyncState(client)
+    return res.json({
+      success: true,
+      state: {
+        ready: observed.ready,
+        hasSynced: observed.hasSynced,
+        connectionState: observed.connectionState,
+        recentCompleted: observed.recentCompleted,
+        isOfflineDeliveryEnd: observed.isOfflineDeliveryEnd,
+        isResumeComplete: observed.isResumeComplete,
+        hasMessagesToDownload: observed.hasMessagesToDownload,
+        offlineProgress: observed.offlineProgress,
+        catchupSourceReady: getCatchupSourceReady(sessionId)
       }
     })
-    return res.json({ success: true, state })
   } catch (error) {
     sendErrorResponse(res, 500, error)
   }

@@ -3,10 +3,11 @@ const fs = require('fs')
 const path = require('path')
 const sessions = new Map()
 const initializingSessions = new Map()
-const { baseWebhookURL, sessionFolderPath, maxAttachmentSize, setMessagesAsSeen, webVersion, webVersionCacheType, recoverSessions, chromeBin, headless, releaseBrowserLock, proxyUrl, proxyUsername, proxyPassword } = require('./config')
+const { baseWebhookURL, internalLifecycleURL, sessionFolderPath, maxAttachmentSize, setMessagesAsSeen, webVersion, webVersionCacheType, recoverSessions, chromeBin, headless, releaseBrowserLock, proxyUrl, proxyUsername, proxyPassword } = require('./config')
 const { triggerWebhook, waitForNestedObject, isEventEnabled, sendMessageSeenStatus, sleep, patchWWebLibrary } = require('./utils')
 const { logger } = require('./logger')
 const { initWebSocketServer, terminateWebSocketServer, triggerWebSocket } = require('./websocket')
+const { createLifecycleController, clearCatchupSourceState } = require('./catchupSource')
 
 // Function to validate if the session is ready
 const SEND_SESSION_READY_ATTEMPTS = 150
@@ -236,7 +237,13 @@ const setupSession = async (sessionId) => {
         }
     }
 
+    clearCatchupSourceState(sessionId)
     const client = new Client(clientOptions)
+    const catchupSourceLifecycle = createLifecycleController({
+      client,
+      sessionId,
+      internalLifecycleURL
+    })
     initializingSessions.set(sessionId, client)
     if (releaseBrowserLock) {
       // See https://github.com/puppeteer/puppeteer/issues/4860
@@ -252,6 +259,11 @@ const setupSession = async (sessionId) => {
       client.once('ready', () => {
         patchWWebLibrary(client).catch((err) => {
           logger.error({ sessionId, err }, 'Failed to patch WWebJS library')
+        })
+      })
+      client.on('ready', () => {
+        catchupSourceLifecycle.begin().catch((err) => {
+          logger.error({ sessionId, err }, 'Failed to initialize WWebJS catch-up source lifecycle')
         })
       })
       initWebSocketServer(sessionId)
@@ -272,6 +284,7 @@ const setupSession = async (sessionId) => {
         logger.error({ sessionId, err: cleanupError }, 'Failed to destroy client after initialize error')
       }
       initializingSessions.delete(sessionId)
+      clearCatchupSourceState(sessionId)
       throw error
     }
 
@@ -292,6 +305,7 @@ const initializeEvents = (client, sessionId) => {
     waitForNestedObject(client, 'pupPage').then(() => {
       const restartSession = async (sessionId) => {
         sessions.delete(sessionId)
+        clearCatchupSourceState(sessionId)
         await client.destroy().catch(e => { })
         await setupSession(sessionId)
       }
@@ -607,6 +621,7 @@ const reloadSession = async (sessionId) => {
       }
     }
     sessions.delete(sessionId)
+    clearCatchupSourceState(sessionId)
     await setupSession(sessionId)
   } catch (error) {
     logger.error({ sessionId, err: error }, 'Failed to reload session')
@@ -636,6 +651,7 @@ const destroySession = async (sessionId) => {
     }
     sessions.delete(sessionId)
     initializingSessions.delete(sessionId)
+    clearCatchupSourceState(sessionId)
   } catch (error) {
     logger.error({ sessionId, err: error }, 'Failed to stop session')
     throw error
@@ -671,6 +687,7 @@ const deleteSession = async (sessionId, validation) => {
       maxDelay++
     }
     sessions.delete(sessionId)
+    clearCatchupSourceState(sessionId)
     await deleteSessionFolder(sessionId)
   } catch (error) {
     logger.error({ sessionId, err: error }, 'Failed to delete session')
