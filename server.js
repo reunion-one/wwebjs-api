@@ -1,5 +1,5 @@
 const app = require('./src/app')
-const { servicePort, baseWebhookURL, enableWebHook, enableWebSocket, autoStartSessions } = require('./src/config')
+const { servicePort, serviceHost, baseWebhookURL, enableWebHook, enableWebSocket, autoStartSessions } = require('./src/config')
 const { logger } = require('./src/logger')
 const { handleUpgrade } = require('./src/websocket')
 const { restoreSessions, sessions, initializingSessions, destroySession } = require('./src/sessions')
@@ -10,8 +10,8 @@ if (!baseWebhookURL && enableWebHook) {
   process.exit(1) // Terminate the application with an error code
 }
 
-const server = app.listen(servicePort, () => {
-  logger.info(`Server running on port ${servicePort}`)
+const server = app.listen(servicePort, serviceHost, () => {
+  logger.info('Server running on ' + serviceHost + ':' + servicePort)
   logger.debug({ configuration: require('./src/config') }, 'Service configuration')
   if (autoStartSessions) {
     logger.info('Starting all sessions')

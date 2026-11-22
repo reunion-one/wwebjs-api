@@ -3,6 +3,7 @@ require('dotenv').config({ path: process.env.ENV_PATH || '.env' })
 
 // setup global const
 const servicePort = process.env.PORT || 3000
+const serviceHost = process.env.HOST || '127.0.0.1'
 const sessionFolderPath = process.env.SESSIONS_PATH || './sessions'
 const enableLocalCallbackExample = (process.env.ENABLE_LOCAL_CALLBACK_EXAMPLE || '').toLowerCase() === 'true'
 const globalApiKey = process.env.API_KEY
@@ -29,9 +30,23 @@ const trustProxy = process.env.TRUST_PROXY ? (process.env.TRUST_PROXY).toLowerCa
 const proxyUrl = process.env.PROXY_URL || null
 const proxyUsername = process.env.PROXY_USERNAME ?? null
 const proxyPassword = process.env.PROXY_PASSWORD ?? null
+const internalLifecycleURL = (() => {
+  if (!baseWebhookURL) return null
+  try {
+    const url = new URL(baseWebhookURL)
+    if (!['127.0.0.1', '::1', 'localhost'].includes(url.hostname)) return null
+    url.pathname = '/internal/wwebjs-lifecycle'
+    url.search = ''
+    url.hash = ''
+    return url.toString()
+  } catch {
+    return null
+  }
+})()
 
 module.exports = {
   servicePort,
+  serviceHost,
   sessionFolderPath,
   enableLocalCallbackExample,
   globalApiKey,
@@ -57,5 +72,6 @@ module.exports = {
   trustProxy,
   proxyUrl,
   proxyUsername,
-  proxyPassword
+  proxyPassword,
+  internalLifecycleURL
 }

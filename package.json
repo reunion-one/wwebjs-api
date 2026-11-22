@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "config:check": "node scripts/check-config.js",
     "test": "jest --runInBand",
     "swagger": "node swagger.js",
     "postinstall": "patch-package"
