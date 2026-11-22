@@ -1,207 +1,105 @@
-# WWebJS REST API
+# Reunion WWebJS service
 
-REST API wrapper for the [whatsapp-web.js](https://github.com/pedroslopez/whatsapp-web.js) library, providing an easy-to-use interface to interact with the WhatsApp Web platform. 
-It is designed to be used as a docker container, scalable, secure, and easy to integrate with other non-NodeJS projects.
+This repository is the pinned WhatsApp Web service used by Reunion COMM. It wraps `whatsapp-web.js` behind a local REST/callback API and contains Reunion-specific session recovery, catch-up-source readiness, callback, and graceful-shutdown behavior.
 
-This project is a fork of [whatsapp-api](https://github.com/chrishubert/whatsapp-api). As the project was abandoned by the original author, all future improvements will be in this repo.
+The Reunion superproject pins the exact reviewed revision through its gitlink. Production installation uses `npm ci`; `postinstall` applies the tracked `patch-package` patches. Do not replace the pinned `whatsapp-web.js` revision or remove those patches without revalidating restored-session behavior and the repository test cycle.
 
-The project is a work in progress: star it, create issues, features or pull requests ❣️
+## Production deployment contract
 
-**NOTE**: I can't guarantee you will not be blocked by using this method, although it has worked for me. WhatsApp does not allow bots or unofficial clients on their platform, so this shouldn't be considered totally safe.
+Bootstrap renders the production `.env` and runs this service directly as:
 
-## Table of Contents
-
-[1. Quick Start with Docker](#quick-start-with-docker)
-
-[2. Features](#features)
-
-[3. Run Locally](#run-locally)
-
-[4. Testing](#testing)
-
-[5. Documentation](#documentation)
-
-[6. Deploy to Production](#deploy-to-production)
-
-[7. Contributing](#contributing)
-
-[8. License](#license)
-
-[9. Star History](#star-history)
-
-## Quick Start with Docker
-
-[![dockeri.co](https://dockerico.blankenship.io/image/avoylenko/wwebjs-api)](https://hub.docker.com/r/avoylenko/wwebjs-api)
-
-1. Clone the repository:
-
-```bash
-git clone https://github.com/avoylenko/wwebjs-api.git
-cd wwebjs-api
+```text
+node server.js
 ```
 
-3. Run the Docker Compose:
+The production configuration is private and loopback-only:
+
+- `HOST` is a literal loopback address;
+- `PORT` comes from bootstrap `WWEBJS_PORT`;
+- `BASE_WEBHOOK_URL` points to COMM's loopback `/whatsapp-webhook` endpoint;
+- `AUTO_START_SESSIONS=FALSE`;
+- `ENABLE_WEBSOCKET=FALSE`;
+- `ENABLE_SWAGGER_ENDPOINT=FALSE`;
+- `ENABLE_WEB_UI=FALSE`;
+- LocalAuth state lives under the configured persistent `SESSIONS_PATH`;
+- Chromium/headless/proxy settings come from bootstrap configuration.
+
+The service is not a public ingress surface. COMM and bootstrap are its production callers.
+
+## Selected session ownership
+
+Reunion production uses one selected WhatsApp session for the configured agent phone. Bootstrap derives the session ID from the canonical agent E.164 number by removing the leading `+`.
+
+WWebJS does not choose the production session. Because production sets `AUTO_START_SESSIONS=FALSE`, bootstrap starts the listener, queries the derived selected session, and starts that session only if the service reports it absent. Sibling LocalAuth directories are not enumerated or auto-started by the production lifecycle.
+
+A persistent LocalAuth directory is reusable across ordinary service restarts. If the saved authentication is still valid, the selected session reconnects without QR pairing. If authentication is required, the session exposes QR state for bootstrap/operator handling.
+
+`/ping` proves process liveness only. Session `CONNECTED` proves authentication/socket state; it does not prove startup history/catch-up readiness.
+
+## Graceful shutdown and LocalAuth
+
+`server.js` handles `SIGTERM` and `SIGINT` as application shutdown signals. Shutdown is idempotent and:
+
+1. visits both active and initializing session IDs;
+2. calls the session-preserving `destroySession()` path;
+3. waits for browser/client teardown;
+4. closes the HTTP server;
+5. exits `0` on successful shutdown.
+
+`destroySession()` is the normal service-stop path. It destroys browser/client state and removes in-memory/session-runtime state but does **not** call WhatsApp logout and does **not** delete the LocalAuth directory.
+
+`deleteSession()` is a destructive administrative path: it logs out when possible and removes session storage. Do not use logout/delete semantics for normal bootstrap stop, restart, test-cycle cleanup, or deployment update.
+
+The production systemd unit uses `KillMode=mixed` with a bounded stop timeout so the main Node process gets the graceful-shutdown opportunity while leftover child processes are still bounded by systemd.
+
+## Restored-session browser bridge
+
+The tracked `patch-package` patch under `patches/` is required for restored LocalAuth sessions. A browser page is not treated as fully injected merely because `window.WWebJS` exists; the browser-to-Node event bridge must also be attached. Navigation/page recovery reinjects when that bridge is incomplete.
+
+This boundary preserves callbacks such as `message_create` after reconnecting a saved session and keeps send operations fail-closed while the injected bridge is unavailable.
+
+## Catch-up-source readiness
+
+WWebJS owns WhatsApp-Web-specific synchronization interpretation. It derives an additive `catchupSourceReady` state from provider/browser synchronization signals rather than asking COMM to interpret raw RECENT-history, offline-delivery, socket, or `ready` events.
+
+Every new/reinitialized client lifecycle starts fail-closed with catch-up-source readiness false. Readiness transitions are delivered to COMM's internal loopback lifecycle endpoint independently of ordinary public callback filtering. A false transition invalidates downstream readiness; a true transition allows COMM to re-read the state and perform its own Reunion catch-up convergence.
+
+This separation means:
+
+- session `CONNECTED` is not historical-sync completion;
+- disabled ordinary callbacks do not suppress internal lifecycle readiness delivery;
+- COMM remains the owner of canonical WhatsApp catch-up completion.
+
+## Webhook and API behavior
+
+Ordinary WhatsApp events are delivered to `BASE_WEBHOOK_URL` when webhook delivery is enabled. Per-session callback overrides, WebSocket mode, Swagger UI, and the session-management web UI exist as service capabilities, but the Reunion production configuration keeps WebSocket/Swagger/UI disabled and uses the bootstrap-rendered COMM callback URL.
+
+The REST surface includes session lifecycle/status/QR endpoints and client/group/message operations. `swagger.json` is the generated OpenAPI description; regenerate it with:
 
 ```bash
-docker compose pull && docker compose up
+npm run swagger
 ```
-4. Visit http://localhost:3000/session/start/ABCD
 
-5. Scan the QR on your console using WhatsApp mobile app -> Linked Device -> Link a Device (it may take time to setup the session)
+## Local development and validation
 
-6. Visit http://localhost:3000/client/getContacts/ABCD
-
-7. EXTRA: Look at all the callbacks data in `./session/message_log.txt`
-
-![Quick Start](./assets/basic_start.gif)
-
-## Features
-
-1. API and Callbacks
-
-| Actions                      | Status | Sessions                                | Status | Callbacks                                      | Status |
-| ----------------------------| ------| ----------------------------------------| ------| ----------------------------------------------| ------|
-| Send Image Message           | ✅     | Initiate session                       | ✅    | Callback QR code                               | ✅     |
-| Send Video Message(requires Google Chrome)           | ✅     | Terminate session                      | ✅    | Callback new message                           | ✅     |
-| Send Audio Message           | ✅     | Terminate inactive sessions            | ✅    | Callback status change                         | ✅     |
-| Send Document Message        | ✅     | Terminate all sessions                 | ✅    | Callback message media attachment              | ✅     |
-| Send File URL                | ✅     | Restart session                            | ✅    |                                                |        |
-| Send Contact Message         | ✅     | Get session status                                      |  ✅      |                                                |        |
-| Send Poll Message         | ✅     | Health Check                                       |   ✅     |                                                |        |
-| Edit Message         | ✅     |                                        |        |                                                |        |
-| Set Status                   | ✅     |                                        |        |                                                |        |
-| Is On Whatsapp?              | ✅     |                                        |        |                                                |        |
-| Download Profile Picture         | ✅     |                                        |        |                                                |        |
-| User Status                  | ✅     |                                        |        |                                                |        |
-| Block/Unblock User           | ✅     |                                        |        |                                                |        |
-| Update Profile Picture       | ✅     |                                        |        |                                                |        |
-| Create Group                 | ✅     |                                        |        |                                                |        |
-| Leave Group                  | ✅     |                                        |        |                                                |        |
-| All Groups                   | ✅     |                                        |        |                                                |        |
-| Invite User                  | ✅     |                                        |        |                                                |        |
-| Make Admin                   | ✅     |                                        |        |                                                |        |
-| Demote Admin                 | ✅     |                                        |        |                                                |        |
-| Group Invite Code            | ✅     |                                        |        |                                                |        |
-| Update Group Participants    | ✅     |                                        |        |                                                |        |
-| Update Group Setting         | ✅     |                                        |        |                                                |        |
-| Update Group Subject         | ✅     |                                        |        |                                                |        |
-| Update Group Description     | ✅     |                                        |        |                                                |        |
-
-1. Handle multiple client sessions (session data saved locally), identified by unique id
-
-2. All endpoints may be secured by a global API key
-
-3. On server start, all existing sessions are restored
-
-4. Set messages automatically as read
-
-5. Disable any of the callbacks
-
-## Run Locally
-
-1. Clone the repository:
+Node.js 20 or newer is required.
 
 ```bash
-git clone https://github.com/avoylenko/wwebjs-api.git
-cd wwebjs-api
-```
-
-2. Install the dependencies:
-
-```bash
-npm install
-```
-
-**Note:** To use the latest edge version of whatsapp-web.js directly from GitHub (with the latest features and fixes), modify the `package.json` dependency:
-
-```json
-"whatsapp-web.js": "github:pedroslopez/whatsapp-web.js#main"
-```
-
-Then run `npm install` again. Be aware that edge versions may contain unstable features.
-
-3. Copy the `.env.example` file to `.env` and update the required environment variables:
-
-```bash
+npm ci
 cp .env.example .env
+npm run config:check
+npm test
+npm start
 ```
 
-4. Run the application:
+`.env.example` describes standalone local defaults. In particular, standalone `AUTO_START_SESSIONS` defaults to true when unset; the Reunion production environment explicitly renders it false and bootstrap owns selected-session startup.
 
-```bash
-npm run start
-```
+Repository-level production-fidelity validation is run from the superproject through `test_harness/`. The WWebJS-specific offline phase runs this submodule's Jest suite, and live phases additionally validate the authenticated selected session, phone parsing, COMM callback path, restart continuity, and clean production lifecycle behavior.
 
-5. Access the API at `http://localhost:3000`
+## Security and disclaimer
 
-## Testing
+This service uses an unofficial WhatsApp Web client and must be treated as a private integration component. Reunion production binds it to loopback rather than exposing it directly to the internet. WhatsApp may change or restrict unofficial-client behavior without notice.
 
-Run the test suite with the following command:
+This project is not affiliated with, authorized by, or endorsed by WhatsApp or Meta. Third-party names and marks belong to their respective owners.
 
-```bash
-npm run test
-```
-
-## Documentation
-
-API documentation can be found in the [`swagger.json`](https://raw.githubusercontent.com/avoylenko/wwebjs-api/main/swagger.json) file. See this file directly into [Swagger Editor](https://editor.swagger.io/?url=https://raw.githubusercontent.com/avoylenko/wwebjs-api/main/swagger.json) or any other OpenAPI-compatible tool to view and interact with the API documentation.
-
-This documentation is straightforward if you are familiar with whatsapp-web.js library (https://docs.wwebjs.dev/)
-If you are still confused - open an issue and I'll improve it.
-
-Also, there is an option to run the documentation endpoint locally by setting the `ENABLE_SWAGGER_ENDPOINT` environment variable. Restart the service and go to `/api-docs` endpoint to see it.
-
-By default, all callback events are delivered to the webhook defined with the `BASE_WEBHOOK_URL` environment variable.
-This can be overridden by setting the `*_WEBHOOK_URL` environment variable, where `*` is your sessionId.
-For example, if you have the sessionId defined as `DEMO`, the environment variable must be `DEMO_WEBHOOK_URL`.
-
-By setting the `DISABLED_CALLBACKS` environment variable you can specify what events you are **not** willing to receive on your webhook.
-
-By setting the `ENABLE_WEBHOOK` environment to `FALSE` you can disable webhook dispatching. This will help you if you want to switch to websocket method(see below).
-
-### Web dashboard
-
-The service ships with a simple web UI for session management. It is disabled by default — set the `ENABLE_WEB_UI` environment variable to `TRUE`, restart the service and go to the `/dashboard` endpoint. The dashboard lets you start, stop, restart and terminate sessions, scan the pairing QR code (or request a pairing code for a phone number) and inspect connected session details. If the `API_KEY` environment variable is set, enter the key in the dashboard header — it is stored in your browser's localStorage and sent as the `x-api-key` header with every request.
-
-### Scanning QR code
-
-In order to validate a new WhatsApp Web instance you need to scan the QR code using your mobile phone. Official documentation can be found at (https://faq.whatsapp.com/1079327266110265/?cms_platform=android) page. The service itself delivers the QR code content as a webhook event or you can use the REST endpoints (`/session/qr/:sessionId` or `/session/qr/:sessionId/image` to get the QR code as a png image). 
-
-### Outbound Proxy
-The Chromium instance that powers each session can be routed through an outbound proxy by setting the `PROXY_URL` environment variable (e.g. `http://10.0.0.10:8118`, `https://...`, or `socks5://...`). When `PROXY_URL` is empty, sessions connect directly with no behavior change.
-
-If the proxy requires authentication, set `PROXY_USERNAME` and `PROXY_PASSWORD`. When both are defined they are forwarded to Chromium as HTTP Basic auth via puppeteer's `proxyAuthentication`. For API-key vendor proxies, use the vendor-specified username (often `api-key`) and the key itself as the password.
-
-### WebSocket mode
-The service can dispatch realtime events through websocket connection. By default, the websocket is not activated, so you need manually set the `ENABLE_WEBSOCKET` environment variable to activate it. The server activates a new websocket instance per each active session. The websocket path is `/ws/:sessionId`, where sessionId is your configured session name. The websocket supports ping/pong scheme to keep the socket running.
-The below example shows how to receive the events for **test** session.
-```
-const ws = new WebSocket('ws://127.0.0.1:3000/ws/test');
-
-ws.on('message', (data) => {
-    // consume the events
-});
-```
-
-## Deploy to Production
-
-- Load the docker image in docker-compose, or your Kubernetes environment
-- Disable the `ENABLE_LOCAL_CALLBACK_EXAMPLE` environment variable
-- Set the `API_KEY` environment variable to protect the REST endpoints
-- Run periodically the `/api/terminateInactiveSessions` endpoint to prevent useless sessions to take up space and resources(only in case you are not in control of the sessions)
-
-## Contributing
-
-Please read [CONTRIBUTING.md](./CONTRIBUTING.md) for details on our code of conduct, and the process for submitting pull requests to us.
-
-## Disclaimer
-
-This project is not affiliated, associated, authorized, endorsed by, or in any way officially connected with WhatsApp or any of its subsidiaries or its affiliates. The official WhatsApp website can be found at https://whatsapp.com. "WhatsApp" as well as related names, marks, emblems and images are registered trademarks of their respective owners.
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE.md](./LICENSE.md) file for details.
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=avoylenko/wwebjs-api&type=Date)](https://star-history.com/#avoylenko/wwebjs-api&Date)
+The project is distributed under the MIT License; see `LICENSE.md`.
