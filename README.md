@@ -82,7 +82,7 @@ npm run swagger
 
 ## Local development and validation
 
-Node.js 20 or newer is required.
+Node.js 22.12.0 or newer is required by the reviewed Puppeteer 25 dependency (Reunion bootstrap requires 22.19.0 or newer). The exact WhatsApp upstream revision and restored-session patch remain pinned. The narrowly scoped Puppeteer override is required to remove the vulnerable browser archive/proxy/schema stack. Jest runs with VM modules enabled to exercise the ESM browser dependency from the CommonJS wrapper.
 
 ```bash
 npm ci
